@@ -1,0 +1,6 @@
+node_modules
+dist
+dx-test-app
+dx-test-reports
+*.png
+.env
