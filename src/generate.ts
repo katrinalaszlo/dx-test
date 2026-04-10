@@ -214,23 +214,109 @@ export async function generate(productPath: string, options: GenerateOptions) {
   });
   const routeList = uniqueRoutes.map((r) => `${r.method} ${r.path}`).join("\n");
 
+  // Classify the product to inject category-specific guidance
+  const routePaths = uniqueRoutes.map((r) => r.path.toLowerCase()).join(" ");
+  const categories: string[] = [];
+  if (
+    routePaths.match(
+      /billing|subscription|plan|checkout|invoice|payment|stripe/,
+    )
+  )
+    categories.push("billing");
+  if (routePaths.match(/analytics|metrics|events|track|usage|cost|revenue/))
+    categories.push("analytics");
+  if (routePaths.match(/auth|login|signup|user|session|token/))
+    categories.push("auth");
+  if (routePaths.match(/chat|completion|model|inference|llm|embed|prompt/))
+    categories.push("ai");
+  if (routePaths.match(/customer|cohort|segment|user/)) categories.push("crm");
+  if (routePaths.match(/alert|notification|webhook/)) categories.push("alerts");
+  if (routePaths.match(/gateway|proxy|route|config/))
+    categories.push("gateway");
+  if (routePaths.match(/team|invite|role|member/)) categories.push("team");
+
+  console.log(
+    chalk.dim(`Product categories: ${categories.join(", ") || "general"}`),
+  );
+
+  const categoryGuidance: Record<string, string> = {
+    billing: `BILLING PRODUCT: The example app MUST include:
+- A pricing page showing available plans with prices, fetched from the API
+- A subscribe/checkout flow that calls the subscription creation endpoint
+- A billing dashboard showing current plan, usage, and invoices
+- Plan change flow (upgrade/downgrade) if endpoints exist
+- Cancellation flow with confirmation`,
+
+    analytics: `ANALYTICS PRODUCT: The example app MUST include:
+- A dashboard with charts/tables showing key metrics (revenue, costs, usage, margins)
+- An events table showing recent tracked events with filters
+- A way to send/ingest test events to verify tracking works
+- Customer-level detail view showing per-customer data
+- Use real data from the API, display as tables with proper formatting`,
+
+    auth: `AUTH PRODUCT: The example app MUST include:
+- Signup page with email/password form
+- Login page with email/password form
+- Protected dashboard that requires authentication
+- Logout functionality
+- Session handling (store token in cookie or localStorage)
+- Show current user info when logged in`,
+
+    ai: `AI PRODUCT: The example app MUST include:
+- A chat/prompt interface where users can type a query
+- Display AI responses with proper formatting
+- Model selection if multiple models are available
+- Show cost/token usage per request if available
+- History of previous interactions`,
+
+    crm: `CRM/CUSTOMER DATA: The example app MUST include:
+- Customer list with search/filter
+- Customer detail view showing all data for one customer
+- Cohort/segment views if endpoints exist`,
+
+    alerts: `ALERTS: The example app MUST include:
+- Alert list showing current alerts
+- Create alert form
+- Alert detail/edit view`,
+
+    gateway: `API GATEWAY: The example app MUST include:
+- Configuration list showing current routing configs
+- Create/edit configuration form
+- Provider status display
+- Test endpoint to verify routing works`,
+
+    team: `TEAM MANAGEMENT: The example app MUST include:
+- Team member list
+- Invite member form
+- Role display`,
+  };
+
+  const specificGuidance = categories
+    .map((cat) => categoryGuidance[cat])
+    .filter(Boolean)
+    .join("\n\n");
+
   const prompt = `You are generating a working example app that integrates with a product called "${productName}".
 
-This example app simulates what a real customer would build using this product. It serves two purposes:
+This example app simulates what a REAL customer would build using this product. It serves two purposes:
 1. Test that the product's API actually works end-to-end from a client's perspective
-2. Become a reference implementation the company can open source for their customers
+2. Become a polished reference implementation the company can open source for their customers
 
 CRITICAL RULES:
-- Do NOT invent SDK packages that don't exist. Use fetch() to call the product's API directly.
-- The product runs at a configurable base URL (default http://localhost:3001). Proxy or call its API from your Express backend.
+- Do NOT invent SDK packages that don't exist. Use the built-in fetch() (Node 18+) to call the product's API.
+- Do NOT use require('node-fetch') — use native fetch.
+- The product runs at PRODUCT_API_URL (default http://localhost:3001). Your Express backend proxies calls to it.
 - Use ONLY real API endpoints from the route list below. Do not make up endpoints.
 - The app must actually work when pointed at the running product.
+- Use "type": "module" in package.json and ES module imports (import/export), OR use CommonJS consistently. Do not mix.
 
-Here are the product's actual API endpoints:
+Here are the product's actual API endpoints (${uniqueRoutes.length} total):
 
 <api-routes>
 ${routeList}
 </api-routes>
+
+${specificGuidance ? `\nBased on the endpoints, this product covers: ${categories.join(", ")}.\n\n${specificGuidance}\n` : ""}
 
 Here is additional context about the product (README, env vars, code):
 
@@ -238,35 +324,42 @@ Here is additional context about the product (README, env vars, code):
 ${context}
 </product-context>
 
-Generate a complete, runnable example app:
+Generate a COMPLETE, production-quality example app:
 
-1. Express.js backend + vanilla HTML frontend (no React/Vue/build step)
-2. Backend proxies API calls to the product at PRODUCT_API_URL
-3. Frontend has real pages for key user flows:
-   - If there are auth endpoints: signup and login pages
-   - Dashboard/home page showing the main data the product provides
-   - Pages for the 3-5 most important features (based on the routes)
-   - Forms for creating/sending data to the product
-   - Error states that show meaningful messages
-4. Clean, styled UI (use a system font stack, simple CSS grid/flexbox)
-5. .env.example with PRODUCT_API_URL and any API keys needed
-6. package.json with only real npm packages (express, dotenv — that's probably it)
+BACKEND (server.js):
+- Express.js, reads PORT from env
+- Proxy routes for every major feature area (not just 2 endpoints — cover the key user flows)
+- Forward cookies/auth headers to the product API
+- Proper error handling that returns the upstream error message
 
-The app should feel like a real product, not a demo. Multiple pages, navigation, real data display. Think: what would a customer's customer actually see and do?
+FRONTEND (multiple HTML files):
+- Shared layout with navigation sidebar or header
+- Separate pages for each feature area (at least 5-7 pages)
+- Dashboard/home page as the landing page
+- Each page fetches real data and displays it in tables, cards, or lists
+- Forms for creating/submitting data
+- Loading states and error states
+- Clean, modern styling — system font stack, CSS variables for colors, card layouts, proper spacing
+- Responsive (looks good on desktop)
 
-Respond with files in this exact format:
+FILES TO GENERATE:
+- package.json (express + dotenv only, no other deps)
+- server.js
+- public/index.html (dashboard/home)
+- public/styles.css (shared styles)
+- public/app.js (shared JS — navigation, fetch helpers, layout rendering)
+- Additional HTML files for each feature page
+- .env.example
+
+The app should have AT LEAST 5 pages with real functionality. Think: what would a developer evaluating this product want to see working?
+
+Respond with files in this exact format — one block per file:
 
 ===FILE: path/to/file===
-file contents here
+raw file contents here (NO markdown code fences)
 ===END===
 
-CRITICAL: Do NOT wrap file contents in markdown code fences (\`\`\`). Write raw file contents between ===FILE: and ===END=== markers. No \`\`\`json, no \`\`\`javascript, no backticks of any kind inside the file blocks.
-
-Generate at minimum:
-- package.json
-- server.js
-- public/index.html
-- .env.example`;
+CRITICAL: Do NOT wrap file contents in markdown code fences. No \`\`\`json, no \`\`\`javascript. Raw content only between the markers.`;
 
   let responseText: string;
 
@@ -275,7 +368,7 @@ Generate at minimum:
     const client = new Anthropic();
     const message = await client.messages.create({
       model: "claude-sonnet-4-20250514",
-      max_tokens: 16000,
+      max_tokens: 32000,
       messages: [{ role: "user", content: prompt }],
     });
     responseText =
@@ -285,7 +378,7 @@ Generate at minimum:
     const client = new OpenAI();
     const completion = await client.chat.completions.create({
       model: "gpt-4o",
-      max_tokens: 16000,
+      max_tokens: 16384,
       messages: [{ role: "user", content: prompt }],
     });
     responseText = completion.choices[0]?.message?.content || "";
