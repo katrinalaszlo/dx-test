@@ -41,7 +41,11 @@ interface AppProcess {
 function startApp(appDir: string, port: number): AppProcess {
   const proc = spawn("node", ["server.js"], {
     cwd: appDir,
-    env: { ...process.env, PORT: String(port) },
+    env: {
+      ...process.env,
+      PORT: String(port),
+      PRODUCT_API_URL: process.env.PRODUCT_API_URL || "http://localhost:3001",
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
