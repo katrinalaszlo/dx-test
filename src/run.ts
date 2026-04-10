@@ -102,19 +102,81 @@ async function walkApp(
     }
   }
 
-  // Phase 2: Check if the app itself loads
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-    const html = await res.text();
+  // Phase 2: Check all pages for real content
+  const appDir = path.resolve("dx-test-app/public");
+  const htmlFiles = fs.existsSync(appDir)
+    ? fs.readdirSync(appDir).filter((f) => f.endsWith(".html"))
+    : ["index.html"];
 
-    if (res.status >= 400) {
-      bugs.push({ type: "ui", page: "/", status: res.status });
+  for (const htmlFile of htmlFiles) {
+    const pagePath = htmlFile === "index.html" ? "/" : `/${htmlFile}`;
+    try {
+      const res = await fetch(`${url}${pagePath}`, {
+        signal: AbortSignal.timeout(10000),
+      });
+      const html = await res.text();
+
+      if (res.status >= 400) {
+        bugs.push({ type: "ui", page: pagePath, status: res.status });
+        continue;
+      }
+      if (html.includes("Cannot GET") || html.includes("ECONNREFUSED")) {
+        bugs.push({ type: "ui", page: pagePath, error: "Page not found" });
+        continue;
+      }
+      // Check for raw JSON dumped on page (sign of unformatted data)
+      if (
+        html.includes("JSON.stringify") &&
+        !html.includes("table") &&
+        !html.includes("card")
+      ) {
+        bugs.push({
+          type: "ui-quality",
+          page: pagePath,
+          error:
+            "Page dumps raw JSON instead of rendering data in tables/cards. Data should be formatted as proper UI elements.",
+        });
+      }
+      // Check for empty content divs with no rendering logic
+      const hasRenderLogic =
+        html.includes("innerHTML") ||
+        html.includes("appendChild") ||
+        html.includes("createElement") ||
+        html.includes("template");
+      if (
+        !hasRenderLogic &&
+        html.includes('id="') &&
+        !html.includes("<script")
+      ) {
+        bugs.push({
+          type: "ui-quality",
+          page: pagePath,
+          error:
+            "Page has content containers but no JavaScript to render data into them.",
+        });
+      }
+    } catch (err) {
+      bugs.push({ type: "ui", page: pagePath, error: String(err) });
     }
-    if (html.includes("Cannot GET") || html.includes("ECONNREFUSED")) {
-      bugs.push({ type: "ui", page: "/", error: "App not serving HTML" });
+  }
+
+  // Phase 3: Check that app.js actually renders data, not just JSON.stringify
+  const appJsPath = path.resolve("dx-test-app/public/app.js");
+  if (fs.existsSync(appJsPath)) {
+    const appJs = fs.readFileSync(appJsPath, "utf-8");
+    const jsonStringifyCount = (appJs.match(/JSON\.stringify/g) || []).length;
+    // Look for actual HTML data rendering — table rows, list items, or data-specific elements
+    const dataRenderCount = (
+      appJs.match(/<tr|<td|<th|<thead|<tbody|<li>.*\$\{|\.map\s*\(/gi) || []
+    ).length;
+
+    if (jsonStringifyCount > 0 && dataRenderCount === 0) {
+      bugs.push({
+        type: "ui-quality",
+        page: "app.js",
+        error: `app.js uses JSON.stringify ${jsonStringifyCount} times but has no table/card rendering. Data must be displayed as formatted HTML — tables for lists, cards for details, not raw JSON.`,
+      });
     }
-  } catch (err) {
-    bugs.push({ type: "ui", page: "/", error: String(err) });
   }
 
   const report = {
