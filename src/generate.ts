@@ -1,36 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import chalk from "chalk";
-
-interface ProductAnalysis {
-  name: string;
-  type: "api" | "sdk" | "unknown";
-  language: string | null;
-  routes: Route[];
-  docs: string[];
-  config: Record<string, string>;
-  flows: GeneratedFlow[];
-}
-
-interface Route {
-  method: string;
-  path: string;
-  description: string;
-}
-
-interface GeneratedFlow {
-  name: string;
-  type: "happy" | "error";
-  steps: FlowStep[];
-}
-
-interface FlowStep {
-  action: string;
-  expect: string;
-  selector?: string;
-  url?: string;
-  input?: Record<string, string>;
-}
 
 interface GenerateOptions {
   output: string;
@@ -61,7 +33,8 @@ function findFiles(
         entry.name === "node_modules" ||
         entry.name === ".git" ||
         entry.name === "dist" ||
-        entry.name === "build"
+        entry.name === "build" ||
+        entry.name === ".next"
       )
         continue;
 
@@ -82,175 +55,91 @@ function findFiles(
   return results;
 }
 
-function extractRoutes(filePath: string): Route[] {
-  const content = fs.readFileSync(filePath, "utf-8");
-  const routes: Route[] = [];
+function collectContext(productPath: string): string {
+  const chunks: string[] = [];
 
-  // Express-style routes
-  const expressPattern =
-    /\.(get|post|put|patch|delete)\s*\(\s*['"`]([^'"`]+)['"`]/gi;
-  let match;
-  while ((match = expressPattern.exec(content)) !== null) {
-    routes.push({
-      method: match[1].toUpperCase(),
-      path: match[2],
-      description: "",
-    });
-  }
-
-  // Spring Boot @RequestMapping style
-  const springPattern =
-    /@(Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*)?['"`]([^'"`]+)['"`]/gi;
-  while ((match = springPattern.exec(content)) !== null) {
-    routes.push({
-      method: match[1].toUpperCase(),
-      path: match[2],
-      description: "",
-    });
-  }
-
-  return routes;
-}
-
-function detectLanguage(productPath: string): string | null {
-  if (fs.existsSync(path.join(productPath, "package.json")))
-    return "typescript";
-  if (fs.existsSync(path.join(productPath, "pom.xml"))) return "java";
-  if (fs.existsSync(path.join(productPath, "go.mod"))) return "go";
-  if (
-    fs.existsSync(path.join(productPath, "requirements.txt")) ||
-    fs.existsSync(path.join(productPath, "pyproject.toml"))
-  )
-    return "python";
-  return null;
-}
-
-function generateFlows(routes: Route[]): GeneratedFlow[] {
-  const flows: GeneratedFlow[] = [];
-
-  // Group routes by resource
-  const authRoutes = routes.filter(
-    (r) =>
-      r.path.includes("signup") ||
-      r.path.includes("login") ||
-      r.path.includes("auth"),
-  );
-  const crudRoutes = routes.filter(
-    (r) =>
-      !r.path.includes("signup") &&
-      !r.path.includes("login") &&
-      !r.path.includes("auth"),
-  );
-
-  // Auth happy path
-  if (authRoutes.length > 0) {
-    const signupRoute = authRoutes.find((r) => r.path.includes("signup"));
-    const loginRoute = authRoutes.find((r) => r.path.includes("login"));
-
-    const steps: FlowStep[] = [];
-    if (signupRoute) {
-      steps.push({
-        action: "Navigate to signup page",
-        expect: "Signup form is visible with all required fields",
-        url: "/signup",
-      });
-      steps.push({
-        action: "Fill in registration form with valid data",
-        expect: "All fields accept input without error",
-      });
-      steps.push({
-        action: "Submit registration",
-        expect: "User is created and redirected to main app",
-      });
-    }
-    if (loginRoute) {
-      steps.push({
-        action: "Navigate to login page",
-        expect: "Login form is visible",
-        url: "/login",
-      });
-      steps.push({
-        action: "Log in with created credentials",
-        expect: "User is authenticated and sees dashboard",
-      });
-    }
-
-    if (steps.length > 0) {
-      flows.push({ name: "auth", type: "happy", steps });
-    }
-
-    // Auth error path
-    const errorSteps: FlowStep[] = [];
-    if (signupRoute) {
-      errorSteps.push({
-        action: "Submit signup with empty fields",
-        expect: "Validation errors shown for each required field",
-      });
-      errorSteps.push({
-        action: "Submit signup with invalid email",
-        expect: "Clear error about invalid email format",
-      });
-      errorSteps.push({
-        action: "Submit signup with short password",
-        expect: "Clear error about password requirements",
-      });
-    }
-    if (loginRoute) {
-      errorSteps.push({
-        action: "Submit login with wrong password",
-        expect: "Clear error message — not generic 'something went wrong'",
-      });
-      errorSteps.push({
-        action: "Submit login with non-existent email",
-        expect: "Clear error message — not a stack trace",
-      });
-    }
-
-    if (errorSteps.length > 0) {
-      flows.push({ name: "auth-errors", type: "error", steps: errorSteps });
+  // README
+  const readmePaths = ["README.md", "readme.md", "README"];
+  for (const name of readmePaths) {
+    const p = path.join(productPath, name);
+    if (fs.existsSync(p)) {
+      const content = fs.readFileSync(p, "utf-8");
+      chunks.push(`## README\n\n${content.slice(0, 4000)}`);
+      break;
     }
   }
 
-  // Group CRUD routes by base path for resource flows
-  const resourceMap = new Map<string, Route[]>();
-  for (const route of crudRoutes) {
-    const base = route.path.split("/").slice(0, 4).join("/");
-    if (!resourceMap.has(base)) resourceMap.set(base, []);
-    resourceMap.get(base)!.push(route);
+  // Package.json / build config
+  const pkgPath = path.join(productPath, "package.json");
+  if (fs.existsSync(pkgPath)) {
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+    chunks.push(
+      `## package.json\n\nName: ${pkg.name}\nDescription: ${pkg.description || "none"}\nDependencies: ${Object.keys(pkg.dependencies || {}).join(", ")}\nScripts: ${Object.keys(pkg.scripts || {}).join(", ")}`,
+    );
   }
 
-  for (const [resource, resourceRoutes] of resourceMap) {
-    const name = resource.replace(/^\/api\//, "").replace(/\//g, "-") || "main";
-    const steps: FlowStep[] = [];
-
-    const getRoute = resourceRoutes.find((r) => r.method === "GET");
-    const postRoute = resourceRoutes.find((r) => r.method === "POST");
-
-    if (getRoute) {
-      steps.push({
-        action: `Fetch ${name} list`,
-        expect: "Data loads without error, response is well-structured",
-      });
-    }
-    if (postRoute) {
-      steps.push({
-        action: `Create a new ${name}`,
-        expect: "Item created successfully, reflected in UI",
-      });
-    }
-    if (getRoute && postRoute) {
-      steps.push({
-        action: `Verify created ${name} appears in list`,
-        expect: "New item visible without page refresh",
-      });
-    }
-
-    if (steps.length > 0) {
-      flows.push({ name, type: "happy", steps });
+  // .env.example
+  const envPaths = [".env.example", ".env.sample", ".env.template"];
+  for (const name of envPaths) {
+    const p = path.join(productPath, name);
+    if (fs.existsSync(p)) {
+      chunks.push(`## ${name}\n\n${fs.readFileSync(p, "utf-8")}`);
+      break;
     }
   }
 
-  return flows;
+  // Route files (first 3000 chars each, max 10 files)
+  const routeFiles = findFiles(
+    productPath,
+    [
+      "routes?\\.ts$",
+      "routes?\\.js$",
+      "controller\\.ts$",
+      "controller\\.js$",
+      "Controller\\.java$",
+      "router\\.go$",
+    ],
+    true,
+  ).slice(0, 10);
+
+  for (const file of routeFiles) {
+    const rel = path.relative(productPath, file);
+    const content = fs.readFileSync(file, "utf-8").slice(0, 3000);
+    chunks.push(`## ${rel}\n\n\`\`\`\n${content}\n\`\`\``);
+  }
+
+  // SDK / client files
+  const sdkFiles = findFiles(productPath, [
+    "sdk\\.ts$",
+    "client\\.ts$",
+    "api\\.ts$",
+    "sdk\\.js$",
+    "client\\.js$",
+  ]).slice(0, 3);
+
+  for (const file of sdkFiles) {
+    const rel = path.relative(productPath, file);
+    const content = fs.readFileSync(file, "utf-8").slice(0, 3000);
+    chunks.push(`## ${rel} (SDK/Client)\n\n\`\`\`\n${content}\n\`\`\``);
+  }
+
+  // Docs
+  const docFiles = findFiles(productPath, [
+    "GUIDE\\.md$",
+    "docs?.*\\.md$",
+    "INTEGRATION\\.md$",
+    "QUICKSTART\\.md$",
+    "openapi\\.ya?ml$",
+    "swagger\\.ya?ml$",
+  ]).slice(0, 5);
+
+  for (const file of docFiles) {
+    const rel = path.relative(productPath, file);
+    const content = fs.readFileSync(file, "utf-8").slice(0, 2000);
+    chunks.push(`## ${rel} (docs)\n\n${content}`);
+  }
+
+  return chunks.join("\n\n---\n\n");
 }
 
 export async function generate(productPath: string, options: GenerateOptions) {
@@ -261,14 +150,34 @@ export async function generate(productPath: string, options: GenerateOptions) {
     process.exit(1);
   }
 
-  console.log(chalk.bold(`\ndx-test — Analyzing product\n`));
-  console.log(chalk.dim(`Path: ${resolvedPath}`));
+  const hasAnthropic = !!process.env.ANTHROPIC_API_KEY;
+  const hasOpenAI = !!process.env.OPENAI_API_KEY;
 
-  // Detect language
-  const language = detectLanguage(resolvedPath);
-  console.log(chalk.dim(`Language: ${language || "unknown"}`));
+  if (!hasAnthropic && !hasOpenAI) {
+    console.log(
+      chalk.red("Set ANTHROPIC_API_KEY or OPENAI_API_KEY to generate the app."),
+    );
+    console.log(chalk.dim("  export ANTHROPIC_API_KEY=sk-ant-..."));
+    console.log(chalk.dim("  export OPENAI_API_KEY=sk-..."));
+    process.exit(1);
+  }
 
-  // Find route files
+  const provider = hasAnthropic ? "anthropic" : "openai";
+
+  console.log(chalk.bold(`\ndx-test — Generating test app\n`));
+  console.log(chalk.dim(`Product: ${resolvedPath}`));
+
+  // Collect product context
+  console.log(chalk.dim("Reading product codebase..."));
+  const context = collectContext(resolvedPath);
+  console.log(
+    chalk.dim(`Context: ${Math.round(context.length / 1000)}k chars`),
+  );
+
+  const productName = path.basename(resolvedPath);
+  const outputDir = path.resolve(options.output);
+
+  // Extract actual routes for the prompt
   const routeFiles = findFiles(
     resolvedPath,
     [
@@ -280,68 +189,162 @@ export async function generate(productPath: string, options: GenerateOptions) {
       "router\\.go$",
     ],
     true,
-  );
-  console.log(chalk.dim(`Route files found: ${routeFiles.length}`));
+  ).slice(0, 10);
 
-  // Extract routes
-  const routes: Route[] = [];
-  for (const file of routeFiles) {
-    const fileRoutes = extractRoutes(file);
-    routes.push(...fileRoutes);
+  interface ExtractedRoute {
+    method: string;
+    path: string;
   }
-  console.log(chalk.dim(`API routes found: ${routes.length}`));
-
-  // Find docs
-  const docFiles = findFiles(resolvedPath, [
-    "README\\.md$",
-    "docs?.*\\.md$",
-    "GUIDE\\.md$",
-    "openapi\\.ya?ml$",
-    "swagger\\.ya?ml$",
-    "swagger\\.json$",
-  ]);
-  console.log(chalk.dim(`Doc files found: ${docFiles.length}`));
-
-  // Generate flows
-  const flows = generateFlows(routes);
-  console.log(chalk.bold(`\nGenerated ${flows.length} test flows:\n`));
-
-  for (const flow of flows) {
-    const icon = flow.type === "happy" ? chalk.green("✓") : chalk.red("✗");
-    console.log(`  ${icon} ${flow.name} (${flow.steps.length} steps)`);
-    for (const step of flow.steps) {
-      console.log(chalk.dim(`    → ${step.action}`));
-      console.log(chalk.dim(`      expect: ${step.expect}`));
+  const extractedRoutes: ExtractedRoute[] = [];
+  for (const file of routeFiles) {
+    const content = fs.readFileSync(file, "utf-8");
+    const expressPattern =
+      /\.(get|post|put|patch|delete)\s*\(\s*['"`]([^'"`]+)['"`]/gi;
+    let m;
+    while ((m = expressPattern.exec(content)) !== null) {
+      extractedRoutes.push({ method: m[1].toUpperCase(), path: m[2] });
     }
   }
+  const seen = new Set<string>();
+  const uniqueRoutes = extractedRoutes.filter((r) => {
+    const key = `${r.method} ${r.path}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const routeList = uniqueRoutes.map((r) => `${r.method} ${r.path}`).join("\n");
 
-  // Build analysis output
-  const analysis: ProductAnalysis = {
-    name: path.basename(resolvedPath),
-    type: routes.length > 0 ? "api" : "unknown",
-    language,
-    routes,
-    docs: docFiles.map((f) => path.relative(resolvedPath, f)),
-    config: {},
-    flows,
-  };
+  const prompt = `You are generating a working example app that integrates with a product called "${productName}".
 
-  // Write output
-  const outputDir = path.resolve(options.output);
+This example app simulates what a real customer would build using this product. It serves two purposes:
+1. Test that the product's API actually works end-to-end from a client's perspective
+2. Become a reference implementation the company can open source for their customers
+
+CRITICAL RULES:
+- Do NOT invent SDK packages that don't exist. Use fetch() to call the product's API directly.
+- The product runs at a configurable base URL (default http://localhost:3001). Proxy or call its API from your Express backend.
+- Use ONLY real API endpoints from the route list below. Do not make up endpoints.
+- The app must actually work when pointed at the running product.
+
+Here are the product's actual API endpoints:
+
+<api-routes>
+${routeList}
+</api-routes>
+
+Here is additional context about the product (README, env vars, code):
+
+<product-context>
+${context}
+</product-context>
+
+Generate a complete, runnable example app:
+
+1. Express.js backend + vanilla HTML frontend (no React/Vue/build step)
+2. Backend proxies API calls to the product at PRODUCT_API_URL
+3. Frontend has real pages for key user flows:
+   - If there are auth endpoints: signup and login pages
+   - Dashboard/home page showing the main data the product provides
+   - Pages for the 3-5 most important features (based on the routes)
+   - Forms for creating/sending data to the product
+   - Error states that show meaningful messages
+4. Clean, styled UI (use a system font stack, simple CSS grid/flexbox)
+5. .env.example with PRODUCT_API_URL and any API keys needed
+6. package.json with only real npm packages (express, dotenv — that's probably it)
+
+The app should feel like a real product, not a demo. Multiple pages, navigation, real data display. Think: what would a customer's customer actually see and do?
+
+Respond with files in this exact format:
+
+===FILE: path/to/file===
+file contents here
+===END===
+
+CRITICAL: Do NOT wrap file contents in markdown code fences (\`\`\`). Write raw file contents between ===FILE: and ===END=== markers. No \`\`\`json, no \`\`\`javascript, no backticks of any kind inside the file blocks.
+
+Generate at minimum:
+- package.json
+- server.js
+- public/index.html
+- .env.example`;
+
+  let responseText: string;
+
+  if (provider === "anthropic") {
+    console.log(chalk.dim("Generating app with Claude..."));
+    const client = new Anthropic();
+    const message = await client.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 16000,
+      messages: [{ role: "user", content: prompt }],
+    });
+    responseText =
+      message.content[0].type === "text" ? message.content[0].text : "";
+  } else {
+    console.log(chalk.dim("Generating app with GPT-4o..."));
+    const client = new OpenAI();
+    const completion = await client.chat.completions.create({
+      model: "gpt-4o",
+      max_tokens: 16000,
+      messages: [{ role: "user", content: prompt }],
+    });
+    responseText = completion.choices[0]?.message?.content || "";
+  }
+
+  const filePattern = /===FILE:\s*(.+?)===\n([\s\S]*?)===END===/g;
+  let match;
+  const files: Array<{ path: string; content: string }> = [];
+
+  while ((match = filePattern.exec(responseText)) !== null) {
+    let content = match[2].trim();
+    // Strip markdown code fences if the LLM wrapped them
+    content = content.replace(/^```[\w]*\n?/, "").replace(/\n?```$/, "");
+    files.push({
+      path: match[1].trim(),
+      content,
+    });
+  }
+
+  if (files.length === 0) {
+    console.log(chalk.red("Failed to parse generated app. Raw response:"));
+    console.log(responseText.slice(0, 500));
+    process.exit(1);
+  }
+
+  // Write files
   if (!fs.existsSync(outputDir)) {
     fs.mkdirSync(outputDir, { recursive: true });
   }
 
-  const analysisPath = path.join(outputDir, "analysis.json");
-  fs.writeFileSync(analysisPath, JSON.stringify(analysis, null, 2));
+  for (const file of files) {
+    const filePath = path.join(outputDir, file.path);
+    const fileDir = path.dirname(filePath);
+    if (!fs.existsSync(fileDir)) {
+      fs.mkdirSync(fileDir, { recursive: true });
+    }
+    fs.writeFileSync(filePath, file.content);
+    console.log(chalk.dim(`  wrote ${file.path}`));
+  }
 
-  const flowsPath = path.join(outputDir, "flows.json");
-  fs.writeFileSync(flowsPath, JSON.stringify(flows, null, 2));
-
-  console.log(chalk.bold(`\nOutput written to ${outputDir}`));
-  console.log(chalk.dim(`  analysis.json — product analysis`));
-  console.log(chalk.dim(`  flows.json — generated test flows`));
-  console.log(
-    chalk.dim(`\nNext: run ${chalk.bold("dx-test walk")} to test the flows\n`),
+  // Also save the context for the walk command
+  fs.writeFileSync(
+    path.join(outputDir, ".dx-test-context.json"),
+    JSON.stringify(
+      {
+        productName,
+        productPath: resolvedPath,
+        generatedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ),
   );
+
+  console.log(chalk.bold(`\nGenerated ${files.length} files in ${outputDir}`));
+  console.log(chalk.dim(`\nTo run:`));
+  console.log(chalk.dim(`  cd ${options.output}`));
+  console.log(chalk.dim(`  cp .env.example .env  # fill in your keys`));
+  console.log(chalk.dim(`  npm install`));
+  console.log(chalk.dim(`  npm start`));
+  console.log(chalk.dim(`\nThen: dx-test walk --url http://localhost:4000\n`));
 }

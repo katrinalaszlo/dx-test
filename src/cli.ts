@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import { generate } from "./generate.js";
 import { walk } from "./walk.js";
+import { run } from "./run.js";
 
 const program = new Command();
 
@@ -13,10 +14,22 @@ program
   .version("0.1.0");
 
 program
-  .command("generate")
+  .command("run")
   .description(
-    "Read your product and generate a client-facing example app + test flows",
+    "Full loop: generate example app → install → start → walk → fix → repeat until clean",
   )
+  .argument("<path>", "Path to your product folder")
+  .option(
+    "-o, --output <dir>",
+    "Output directory for generated app",
+    "./dx-test-app",
+  )
+  .option("-m, --max-iterations <n>", "Max fix iterations", "3")
+  .action(run);
+
+program
+  .command("generate")
+  .description("Generate a client-facing example app from your product")
   .argument("<path>", "Path to your product folder")
   .option(
     "-o, --output <dir>",
@@ -27,7 +40,7 @@ program
 
 program
   .command("walk")
-  .description("Walk the generated app and test every flow")
+  .description("Walk an app and test every flow")
   .option(
     "-u, --url <url>",
     "Base URL of the app to walk",
