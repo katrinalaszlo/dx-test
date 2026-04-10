@@ -121,7 +121,7 @@ Bugs: 41
 
 ## Built by
 
-[Kat László](https://github.com/katrinalaszlo) — PM who uses the inspector tool to check fonts.
+[Kat Laszlo](https://github.com/katrinalaszlo)
 
 ## License
 
